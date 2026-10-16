@@ -6,21 +6,32 @@ import com.azhardev.tenderengine.entity.TenderDocumentRecord;
 import com.azhardev.tenderengine.exception.ConcurrentProcessingException;
 import com.azhardev.tenderengine.exception.DocumentProcessingException;
 import com.azhardev.tenderengine.repository.TenderDocumentRepository;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
-@Slf4j
 @Service
-@RequiredArgsConstructor
 public class DatabaseCacheLockService {
 
+    private static final Logger log = LoggerFactory.getLogger(DatabaseCacheLockService.class);
+
     private final TenderDocumentRepository repository;
+
+    @Value("${app.lock.stale-timeout-seconds:120}")
+    private long staleTimeoutSeconds;
+
+    public DatabaseCacheLockService(TenderDocumentRepository repository) {
+        this.repository = repository;
+    }
 
     /**
      * Sub-second fast cache lookup to immediately return COMPLETED records.
@@ -33,14 +44,31 @@ public class DatabaseCacheLockService {
     }
 
     /**
+     * Looks up any document record by its SHA-256 hash.
+     */
+    @Transactional(readOnly = true)
+    public Optional<TenderDocumentRecord> findByDocumentHash(String documentHash) {
+        log.debug("Looking up document record for document hash: {}", documentHash);
+        return repository.findByDocumentHash(documentHash);
+    }
+
+    /**
      * Attempts to acquire an advisory lock and a row-level pessimistic write lock.
      * Throws ConcurrentProcessingException if another worker/thread is currently processing the same document.
+     * If an existing lock is older than staleTimeoutSeconds, recovers the lock.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public TenderDocumentRecord acquireLockOrThrow(String documentHash, String fileName, int pageCount) {
         log.debug("Attempting to acquire transactional lock for document hash: {}", documentHash);
 
-        boolean advisoryLockAcquired = repository.tryAcquireAdvisoryLock(documentHash);
+        boolean advisoryLockAcquired;
+        try {
+            advisoryLockAcquired = repository.tryAcquireAdvisoryLock(documentHash);
+        } catch (Exception ex) {
+            log.debug("Advisory lock check skipped/unsupported in current database dialect: {}", ex.getMessage());
+            advisoryLockAcquired = true;
+        }
+
         if (!advisoryLockAcquired) {
             log.warn("Advisory lock acquisition failed for document hash: {}. Another worker holds this lock.", documentHash);
             throw new ConcurrentProcessingException(
@@ -59,7 +87,24 @@ public class DatabaseCacheLockService {
             }
 
             if (existing.getStatus() == ProcessingStatus.LOCKED_PROCESSING) {
-                log.warn("Document with hash: {} is already in LOCKED_PROCESSING state.", documentHash);
+                Instant referenceTime = existing.getUpdatedAt() != null ? existing.getUpdatedAt() : existing.getCreatedAt();
+                long elapsedSeconds = referenceTime != null
+                        ? Duration.between(referenceTime, Instant.now()).getSeconds()
+                        : Long.MAX_VALUE;
+
+                if (elapsedSeconds >= staleTimeoutSeconds) {
+                    log.warn("Stale lock detected for document hash: {}. Lock held since {} (elapsed: {}s > timeout: {}s). Recovering stale lock.",
+                            documentHash, referenceTime, elapsedSeconds, staleTimeoutSeconds);
+                    existing.setFileName(fileName);
+                    existing.setPageCount(pageCount);
+                    existing.setExtractedMetadata(null);
+                    existing.setProcessingDurationMs(null);
+                    existing.setUpdatedAt(Instant.now());
+                    return repository.saveAndFlush(existing);
+                }
+
+                log.warn("Document with hash: {} is already in LOCKED_PROCESSING state (elapsed: {}s < timeout: {}s).",
+                        documentHash, elapsedSeconds, staleTimeoutSeconds);
                 throw new ConcurrentProcessingException(
                         "Document is actively being processed by another worker. Hash: " + documentHash
                 );
@@ -72,6 +117,7 @@ public class DatabaseCacheLockService {
                 existing.setPageCount(pageCount);
                 existing.setExtractedMetadata(null);
                 existing.setProcessingDurationMs(null);
+                existing.setUpdatedAt(Instant.now());
                 return repository.saveAndFlush(existing);
             }
         }
@@ -84,7 +130,14 @@ public class DatabaseCacheLockService {
                 .status(ProcessingStatus.LOCKED_PROCESSING)
                 .build();
 
-        return repository.saveAndFlush(newRecord);
+        try {
+            return repository.saveAndFlush(newRecord);
+        } catch (DataIntegrityViolationException ex) {
+            log.warn("Concurrent insert race detected for document hash: {}", documentHash, ex);
+            throw new ConcurrentProcessingException(
+                    "Concurrent insert race detected for document hash: " + documentHash, ex
+            );
+        }
     }
 
     /**

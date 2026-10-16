@@ -8,6 +8,11 @@ spring:
     virtual:
       enabled: true
 
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
   datasource:
     url: jdbc:postgresql://localhost:5432/tender_engine_db
     username: postgres
@@ -40,9 +45,11 @@ management:
       show-details: when-authorized
 
 app:
+  lock:
+    stale-timeout-seconds: ${LOCK_STALE_TIMEOUT_SECONDS:120}
   llm:
     base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
     api-key: ${LLM_API_KEY:}
     model: ${LLM_MODEL:gpt-4o-mini}
     timeout-ms: ${LLM_TIMEOUT_MS:30000}
-    heuristic-fallback-enabled: true
+    heuristic-fallback-enabled: ${LLM_HEURISTIC_FALLBACK:false}

@@ -2,7 +2,8 @@ package com.azhardev.tenderengine.service;
 
 import com.azhardev.tenderengine.dto.PdfExtractionResult;
 import com.azhardev.tenderengine.exception.DocumentProcessingException;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -16,9 +17,10 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.regex.Pattern;
 
-@Slf4j
 @Service
 public class PdfStreamExtractorService {
+
+    private static final Logger log = LoggerFactory.getLogger(PdfStreamExtractorService.class);
 
     private static final Pattern PAGE_NOISE_PATTERN = Pattern.compile(
             "(?i)^\\s*(?:page\\s*\\d+\\s*(?:of|/)\\s*\\d+|\\d+\\s*(?:of|/)\\s*\\d+|\\bpage\\s*\\d+\\b)\\s*$",

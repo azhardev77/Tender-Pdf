@@ -1,0 +1,19 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:tender_test_db;DB_CLOSE_DELAY=-1;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;INIT=CREATE ALIAS IF NOT EXISTS hashtext FOR 'com.azhardev.tenderengine.H2Functions.hashtext'\;CREATE ALIAS IF NOT EXISTS pg_try_advisory_xact_lock FOR 'com.azhardev.tenderengine.H2Functions.pg_try_advisory_xact_lock'\;
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        format_sql: false
+    show-sql: false
+
+app:
+  lock:
+    stale-timeout-seconds: 5
+  llm:
+    heuristic-fallback-enabled: true

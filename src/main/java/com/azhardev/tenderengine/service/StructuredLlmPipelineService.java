@@ -7,8 +7,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -18,7 +18,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,10 +26,10 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-@Slf4j
 @Service
-@RequiredArgsConstructor
 public class StructuredLlmPipelineService {
+
+    private static final Logger log = LoggerFactory.getLogger(StructuredLlmPipelineService.class);
 
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
@@ -45,8 +44,14 @@ public class StructuredLlmPipelineService {
     @Value("${app.llm.model:gpt-4o-mini}")
     private String model;
 
-    @Value("${app.llm.heuristic-fallback-enabled:true}")
+    @Value("${app.llm.heuristic-fallback-enabled:false}")
     private boolean heuristicFallbackEnabled;
+
+    public StructuredLlmPipelineService(RestClient restClient, ObjectMapper objectMapper, Validator validator) {
+        this.restClient = restClient;
+        this.objectMapper = objectMapper;
+        this.validator = validator;
+    }
 
     private static final Pattern TENDER_REF_PATTERN = Pattern.compile(
             "(?i)(?:Tender\\s*(?:Notice\\s*)?(?:No|Ref|Reference|ID|Number)?|NIT(?:\\s*No)?|Bid\\s*(?:No|Ref))[:\\s#\\/-]*([A-Z0-9][A-Z0-9\\/\\-_]{3,40})"
@@ -69,7 +74,7 @@ public class StructuredLlmPipelineService {
     );
 
     /**
-     * Extracts structured tender metadata either using LLM or robust heuristic fallback.
+     * Extracts structured tender metadata either using LLM or explicit heuristic fallback.
      */
     public TenderMetadataSchema extractMetadataFromText(String rawText, String fileName) {
         log.info("Extracting metadata for file: {} (text length: {} chars)", fileName, rawText != null ? rawText.length() : 0);
@@ -85,7 +90,11 @@ public class StructuredLlmPipelineService {
                 }
             }
         } else {
-            log.info("No LLM API key configured. Utilizing robust heuristic extraction pipeline for file: {}", fileName);
+            if (!heuristicFallbackEnabled) {
+                log.warn("LLM_API_KEY is not configured and heuristic fallback is disabled for file: {}", fileName);
+                throw new DocumentProcessingException("LLM_API_KEY is not configured and heuristic fallback is disabled");
+            }
+            log.info("No LLM API key configured. Utilizing heuristic extraction pipeline for file: {}", fileName);
         }
 
         return extractHeuristically(rawText, fileName);
@@ -159,22 +168,25 @@ public class StructuredLlmPipelineService {
     }
 
     /**
-     * Robust regex + keyword heuristic parser ensuring valid structured outputs even without LLM connectivity.
+     * Regex + keyword heuristic parser with explicit attribution prefixes.
      */
     public TenderMetadataSchema extractHeuristically(String rawText, String fileName) {
         log.info("Executing heuristic extraction for file: {}", fileName);
         String text = rawText != null ? rawText : "";
 
-        // 1. Tender Reference Number
+        // 1. Tender Reference Number (regex match, or prefixed heuristic fallback)
         String tenderRef = findFirstMatch(TENDER_REF_PATTERN, text);
         if (tenderRef == null || tenderRef.isBlank()) {
-            tenderRef = "TND-" + Math.abs(fileName.hashCode() % 1000000) + "-2026";
+            tenderRef = "HEURISTIC-TND-" + Math.abs(fileName.hashCode() % 1000000) + "-2026";
         }
 
-        // 2. Issuing Authority
+        // 2. Issuing Authority (regex match, keyword match, or prefixed heuristic fallback)
         String issuingAuthority = findFirstMatch(AUTHORITY_PATTERN, text);
         if (issuingAuthority == null || issuingAuthority.isBlank()) {
             issuingAuthority = extractAuthorityKeyword(text);
+        }
+        if (issuingAuthority == null || issuingAuthority.isBlank() || issuingAuthority.equals("National Procurement Authority")) {
+            issuingAuthority = "HEURISTIC: National Procurement Authority";
         }
 
         // 3. Estimated Contract Value

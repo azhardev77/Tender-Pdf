@@ -6,8 +6,8 @@ import com.azhardev.tenderengine.dto.TenderMetadataSchema;
 import com.azhardev.tenderengine.entity.ProcessingStatus;
 import com.azhardev.tenderengine.entity.TenderDocumentRecord;
 import com.azhardev.tenderengine.exception.DocumentProcessingException;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -16,14 +16,47 @@ import java.io.InputStream;
 import java.time.Instant;
 import java.util.Optional;
 
-@Slf4j
 @Service
-@RequiredArgsConstructor
 public class TenderOrchestratorService {
+
+    private static final Logger log = LoggerFactory.getLogger(TenderOrchestratorService.class);
 
     private final PdfStreamExtractorService pdfStreamExtractorService;
     private final DatabaseCacheLockService databaseCacheLockService;
     private final StructuredLlmPipelineService llmPipelineService;
+
+    public TenderOrchestratorService(PdfStreamExtractorService pdfStreamExtractorService,
+                                     DatabaseCacheLockService databaseCacheLockService,
+                                     StructuredLlmPipelineService llmPipelineService) {
+        this.pdfStreamExtractorService = pdfStreamExtractorService;
+        this.databaseCacheLockService = databaseCacheLockService;
+        this.llmPipelineService = llmPipelineService;
+    }
+
+    /**
+     * Ingestion entry point invoking the core processing pipeline.
+     */
+    public TenderExtractionResponse ingestTenderDocument(MultipartFile file) {
+        return processTenderPdf(file);
+    }
+
+    /**
+     * Fetches an existing tender extraction record by its SHA-256 hash.
+     */
+    public Optional<TenderExtractionResponse> getExtractionByHash(String documentHash) {
+        return databaseCacheLockService.findByDocumentHash(documentHash)
+                .map(record -> new TenderExtractionResponse(
+                        record.getId(),
+                        record.getDocumentHash(),
+                        record.getFileName(),
+                        record.getPageCount() != null ? record.getPageCount() : 0,
+                        record.getStatus(),
+                        true,
+                        record.getProcessingDurationMs() != null ? record.getProcessingDurationMs() : 0L,
+                        record.getExtractedMetadata(),
+                        record.getUpdatedAt() != null ? record.getUpdatedAt() : Instant.now()
+                ));
+    }
 
     /**
      * Entry point for MultipartFile uploads.
@@ -67,12 +100,12 @@ public class TenderOrchestratorService {
         String documentHash = pdfStreamExtractorService.computeSha256(fileBytes);
         log.info("Processing tender PDF '{}' with SHA-256 hash: {}", fileName, documentHash);
 
-        // 2. Fast cache path check (<25ms sub-second response)
+        // 2. Fast cache path check
         Optional<TenderDocumentRecord> cachedOpt = databaseCacheLockService.checkFastCachePath(documentHash);
         if (cachedOpt.isPresent()) {
             TenderDocumentRecord cached = cachedOpt.get();
             long executionTimeMs = System.currentTimeMillis() - startTime;
-            log.info("Sub-second cache hit (<{}ms) for document hash: {}", executionTimeMs, documentHash);
+            log.info("Fast cache hit ({}ms) for document hash: {}", executionTimeMs, documentHash);
             return new TenderExtractionResponse(
                     cached.getId(),
                     cached.getDocumentHash(),
@@ -99,7 +132,7 @@ public class TenderOrchestratorService {
         // If another worker completed it right while acquiring lock
         if (lockedRecord.getStatus() == ProcessingStatus.COMPLETED) {
             long executionTimeMs = System.currentTimeMillis() - startTime;
-            log.info("Cache hit resolved post-lock (<{}ms) for document hash: {}", executionTimeMs, documentHash);
+            log.info("Cache hit resolved post-lock ({}ms) for document hash: {}", executionTimeMs, documentHash);
             return new TenderExtractionResponse(
                     lockedRecord.getId(),
                     lockedRecord.getDocumentHash(),
